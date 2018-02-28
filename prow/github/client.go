@@ -1111,14 +1111,41 @@ func (c *Client) CreateReview(org, repo string, number int, r DraftReview) error
 	return err
 }
 
-func (c *Client) tryRequestReview(org, repo string, number int, logins []string) (int, error) {
-	c.log("RequestReview", org, repo, number, logins)
+type ReviewerKind string
+
+const (
+	ReviewerIndividual ReviewerKind = "reviewers"
+	ReviewerTeam       ReviewerKind = "team_reviewers"
+)
+
+type Reviewers map[string]ReviewerKind
+
+func (r Reviewers) Add(usersOrTeams ...string) Reviewers {
+	for _, userOrTeam := range usersOrTeams {
+		if strings.ContainsRune(userOrTeam, '/') {
+			r[userOrTeam] = ReviewerTeam
+		} else {
+			r[userOrTeam] = ReviewerIndividual
+		}
+	}
+	return r
+}
+func (r Reviewers) ToPayload() map[ReviewerKind][]string {
+	p := make(map[ReviewerKind][]string)
+	for who, kind := range r {
+		p[kind] = append(p[kind], who)
+	}
+	return p
+}
+
+func (c *Client) tryRequestReview(org, repo string, number int, reviewers Reviewers) (int, error) {
+	c.log("RequestReview", org, repo, number, reviewers)
 	var pr PullRequest
 	return c.request(&request{
 		method:      http.MethodPost,
 		path:        fmt.Sprintf("%s/repos/%s/%s/pulls/%d/requested_reviewers", c.base, org, repo, number),
 		accept:      "application/vnd.github.black-cat-preview+json",
-		requestBody: map[string][]string{"reviewers": logins},
+		requestBody: reviewers.ToPayload(),
 		exitCodes:   []int{http.StatusCreated /*201*/},
 	}, &pr)
 }
@@ -1129,15 +1156,17 @@ func (c *Client) tryRequestReview(org, repo string, number int, logins []string)
 // so if we fail to request reviews from the members of 'logins' we try to request reviews from
 // each member individually. We try first with all users in 'logins' for efficiency in the common case.
 func (c *Client) RequestReview(org, repo string, number int, logins []string) error {
-	statusCode, err := c.tryRequestReview(org, repo, number, logins)
+	reviewers := make(Reviewers).Add(logins...)
+	statusCode, err := c.tryRequestReview(org, repo, number, reviewers)
 	if err != nil && statusCode == http.StatusUnprocessableEntity /*422*/ {
 		// Failed to set all members of 'logins' as reviewers, try individually.
 		missing := MissingUsers{action: "request a PR review from"}
-		for _, user := range logins {
-			statusCode, err = c.tryRequestReview(org, repo, number, []string{user})
+		for userOrTeam, kind := range reviewers {
+			reviewer := Reviewers{userOrTeam: kind}
+			statusCode, err = c.tryRequestReview(org, repo, number, reviewer)
 			if err != nil && statusCode == http.StatusUnprocessableEntity /*422*/ {
 				// User is not a contributor.
-				missing.Users = append(missing.Users, user)
+				missing.Users = append(missing.Users, userOrTeam)
 			} else if err != nil {
 				return fmt.Errorf("failed to add reviewer to PR. Status code: %d, errmsg: %v", statusCode, err)
 			}
@@ -1157,13 +1186,14 @@ func (c *Client) RequestReview(org, repo string, number int, logins []string) er
 // so we can determine if each deletion was successful.
 // The API responds with http status code 200 no matter what the content of 'logins' is.
 func (c *Client) UnrequestReview(org, repo string, number int, logins []string) error {
+	reviewers := make(Reviewers).Add(logins...)
 	c.log("UnrequestReview", org, repo, number, logins)
 	var pr PullRequest
 	_, err := c.request(&request{
 		method:      http.MethodDelete,
 		path:        fmt.Sprintf("%s/repos/%s/%s/pulls/%d/requested_reviewers", c.base, org, repo, number),
 		accept:      "application/vnd.github.black-cat-preview+json",
-		requestBody: map[string][]string{"reviewers": logins},
+		requestBody: reviewers.ToPayload(),
 		exitCodes:   []int{http.StatusOK /*200*/},
 	}, &pr)
 	if err != nil {
@@ -1172,7 +1202,7 @@ func (c *Client) UnrequestReview(org, repo string, number int, logins []string) 
 	extras := ExtraUsers{action: "remove the PR review request for"}
 	for _, user := range pr.RequestedReviewers {
 		found := false
-		for _, toDelete := range logins {
+		for toDelete := range reviewers {
 			if NormLogin(user.Login) == NormLogin(toDelete) {
 				found = true
 				break

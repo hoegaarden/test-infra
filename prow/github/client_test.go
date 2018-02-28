@@ -30,6 +30,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 type testTime struct {
@@ -645,14 +647,29 @@ func TestRequestReview(t *testing.T) {
 		if len(ps) != 1 {
 			t.Fatalf("Wrong length patch: %v", ps)
 		}
-		switch len(ps["reviewers"]) {
+		actualReviewers := sets.NewString(ps["reviewers"]...)
+		actualTeamReviewers := sets.NewString(ps["team_reviewers"]...)
+
+		switch actualTeamReviewers.Len() + actualReviewers.Len() {
+		case 5:
+			expected := sets.NewString("k8s/team1", "k8s/team2", "k8s/team3", "k8s/team4", "k8s/team5")
+			if !expected.Equal(actualTeamReviewers) {
+				t.Errorf("wrong team reviewers: %v", ps)
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(PullRequest{
+				RequestedTeams: []Team{{Name: "team1"}, {Name: "team2"}, {Name: "team3"}, {Name: "team4"}, {Name: "team5"}},
+			})
+			return
 		case 3:
-			if ps["reviewers"][0] != "george" || ps["reviewers"][1] != "jungle" || ps["reviewers"][2] != "not-a-collaborator" {
+			expected := sets.NewString("george", "jungle", "not-a-collaborator")
+			if !expected.Equal(actualReviewers) {
 				t.Errorf("Wrong reviewers: %v", ps)
 			}
 			//fall out of switch statement to bad reviewer case
 		case 2:
-			if ps["reviewers"][0] != "george" || ps["reviewers"][1] != "jungle" {
+			expected := sets.NewString("george", "jungle")
+			if !expected.Equal(actualReviewers) {
 				t.Errorf("Wrong reviewers: %v", ps)
 			}
 			w.WriteHeader(http.StatusCreated)
@@ -678,7 +695,10 @@ func TestRequestReview(t *testing.T) {
 	defer ts.Close()
 	c := getClient(ts.URL)
 	if err := c.RequestReview("k8s", "kuber", 5, []string{"george", "jungle"}); err != nil {
-		t.Errorf("Unexpected error: %v", err)
+		t.Errorf("Unexpected error requesting review from individuals: %v", err)
+	}
+	if err := c.RequestReview("k8s", "kuber", 5, []string{"k8s/team1", "k8s/team2", "k8s/team3", "k8s/team4", "k8s/team5"}); err != nil {
+		t.Errorf("Unexpected error requesting reiview from teams: %v", err)
 	}
 	if err := c.RequestReview("k8s", "kuber", 5, []string{"george", "jungle", "not-a-collaborator"}); err == nil {
 		t.Errorf("Expected an error")
@@ -709,11 +729,15 @@ func TestUnrequestReview(t *testing.T) {
 		} else if len(ps) != 1 {
 			t.Errorf("Wrong length patch: %v", ps)
 		} else if len(ps["reviewers"]) == 3 {
-			if ps["reviewers"][0] != "george" || ps["reviewers"][1] != "jungle" || ps["reviewers"][2] != "perma-reviewer" {
+			expected := sets.NewString("george", "jungle", "perma-reviewer")
+			actual := sets.NewString(ps["reviewers"]...)
+			if !expected.Equal(actual) {
 				t.Errorf("Wrong reviewers: %v", ps)
 			}
 		} else if len(ps["reviewers"]) == 2 {
-			if ps["reviewers"][0] != "george" || ps["reviewers"][1] != "jungle" {
+			expected := sets.NewString("george", "jungle")
+			actual := sets.NewString(ps["reviewers"]...)
+			if !expected.Equal(actual) {
 				t.Errorf("Wrong reviewers: %v", ps)
 			}
 		} else {

@@ -120,6 +120,11 @@ func TestParseLogins(t *testing.T) {
 			text:   " @erick @fejta",
 			logins: []string{"erick", "fejta"},
 		},
+		{
+			name:   "team",
+			text:   " @kubernetes-sig-testing/reviewers",
+			logins: []string{"kubernetes-sig-testing/reviewers"},
+		},
 	}
 	for _, tc := range testcases {
 		l := parseLogins(tc.text)
